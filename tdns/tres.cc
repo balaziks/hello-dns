@@ -9,12 +9,34 @@
 #include <thread>
 #include <chrono>
 #include "nlohmann/json.hpp"
-/*! 
+#include <systemd/sd-daemon.h>
+
+/*!
    @file
    @brief Teachable resolver
 */
 
 using namespace std;
+
+ComboAddress ip4_src = ComboAddress("0.0.0.0:0");
+ComboAddress ip6_src = ComboAddress("[::]:0");
+
+int ip4_port = 1023;
+int ip6_port = 1023;
+
+int get_next_ip4_port() {
+  ip4_port++;
+  if (ip4_port >= 65535)
+    ip4_port = 1024;
+  return ip4_port;
+}
+
+int get_next_ip6_port() {
+  ip6_port++;
+  if (ip6_port >= 65535)
+    ip6_port = 1024;
+  return ip6_port;
+}
 
 //! Thrown if too many queries have been sent.
 struct TooManyQueriesException{};
@@ -40,7 +62,7 @@ public:
     uint32_t ttl;
     std::unique_ptr<RRGen> rr;
   };
-  
+
   //! This is the end result of our resolving work
   struct ResolveResult
   {
@@ -66,12 +88,12 @@ public:
     if(d_dot)
       (*d_dot) << "}\n";
   }
-  
+
   void setLog(ostream& fs)
   {
     d_log = &fs;
   }
-  
+
   ~TDNSResolver()
   {
   }
@@ -96,7 +118,7 @@ public:
   unsigned int d_numqueries{0};
   unsigned int d_numtimeouts{0};
   unsigned int d_numformerrs{0};
-  
+
 };
 
 /** Helper function that extracts a useable IP address from an
@@ -125,7 +147,7 @@ static ComboAddress getIP(const std::unique_ptr<RRGen>& rr)
 */
 DNSMessageReader TDNSResolver::getResponse(const ComboAddress& server, const DNSName& dn, const DNSType& dt, int depth)
 {
-  // quick hack to prevent us from hammering dead servers 
+  // quick hack to prevent us from hammering dead servers
   static thread_local map<std::tuple<ComboAddress, DNSName, DNSType>, int> skips;
   std::string prefix(depth, ' ');
   prefix += dn.toString() + "|"+toString(dt)+" ";
@@ -134,9 +156,9 @@ DNSMessageReader TDNSResolver::getResponse(const ComboAddress& server, const DNS
   if(skipiter != skips.end() && skipiter->second > 3) {
     throw std::runtime_error("Skipping query to "+server.toString()+": failed before");
   }
-  
+
   bool doEDNS=true, doTCP=false;
-  
+
   for(int tries = 0; tries < 4 ; ++tries) {
     if(++d_numqueries > d_maxqueries) // there is the possibility our algorithm will loop
       throw TooManyQueriesException(); // and send out thousands of queries, so let's not
@@ -144,7 +166,7 @@ DNSMessageReader TDNSResolver::getResponse(const ComboAddress& server, const DNS
     DNSMessageWriter dmw(dn, dt);
     dmw.dh.rd = false;
     dmw.randomizeID();
-    if(doEDNS) 
+    if(doEDNS)
       dmw.setEDNS(1500, false);  // no DNSSEC for now, 1500 byte buffer size
     string resp;
     double timeout=1.0;
@@ -188,11 +210,11 @@ DNSMessageReader TDNSResolver::getResponse(const ComboAddress& server, const DNS
       if( err <= 0) {
         skips[std::tie(server,dn,dt)]++;
         if(!err) d_numtimeouts++;
-        
+
         throw std::runtime_error("Error waiting for data from "+server.toStringWithPort()+": "+ (err ? string(strerror(errno)): string("Timeout")));
       }
       ComboAddress ign=server;
-      resp = SRecvfrom(sock, 65535, ign); 
+      resp = SRecvfrom(sock, 65535, ign);
     }
     skips.erase(std::tie(server,dn,dt));
     DNSMessageReader dmr(resp);
@@ -226,11 +248,11 @@ DNSMessageReader TDNSResolver::getResponse(const ComboAddress& server, const DNS
 /** This takes a list of servers (in a specific order) and shuffles them to a vector.
     This is to spread the load across nameservers
 */
-    
+
 static auto randomizeServers(const multimap<DNSName, ComboAddress>& mservers)
 {
   vector<pair<DNSName, ComboAddress> > servers;
-  for(auto& sp : mservers) 
+  for(auto& sp : mservers)
     servers.push_back(sp);
 
   std::random_device rd;
@@ -267,7 +289,7 @@ void TDNSResolver::dotDelegation(const DNSName& rrdn, const DNSName& server)
   (*d_dot) << '"' << server << "\" -> \"" << rrdn << "\"" <<endl;
 }
 
-/** This attempts to look up the name dn with type dt. The depth parameter is for 
+/** This attempts to look up the name dn with type dt. The depth parameter is for
     trace output.
     the 'auth' field describes the authority of the servers we will be talking to. Defaults to root ('believe everything')
     The multimap specifies the servers to try with. Defaults to a list of
@@ -286,13 +308,13 @@ TDNSResolver::ResolveResult TDNSResolver::resolveAt(const DNSName& dn, const DNS
 
   auto servers = randomizeServers(mservers);
 
-  for(auto& sp : servers) {      
+  for(auto& sp : servers) {
     dotQuery(auth, sp.first);
 
     ret.clear();
     ComboAddress server=sp.second;
     server.sin4.sin_port = htons(53); // just to be sure
-    
+
     if(d_skipIPv6 && server.sin4.sin_family == AF_INET6)
       continue;
     try {
@@ -304,9 +326,9 @@ TDNSResolver::ResolveResult TDNSResolver::resolveAt(const DNSName& dn, const DNS
       uint32_t ttl;
       DNSName rrdn, newAuth;
       DNSType rrdt;
-      
+
       dmr.getQuestion(rrdn, rrdt); // parse into rrdn and rrdt
-      
+
       lstream() << prefix<<"Received a "<< dmr.size() << " byte response with RCode "<<(RCode)dmr.dh.rcode<<", qname " <<dn<<", qtype "<<dt<<", aa: "<<dmr.dh.aa << endl;
       if(rrdn != dn || dt != rrdt) {
         lstream() << prefix << "Got a response to a different question or different type than we asked for!"<<endl;
@@ -324,7 +346,7 @@ TDNSResolver::ResolveResult TDNSResolver::resolveAt(const DNSName& dn, const DNS
       if(dmr.dh.aa) {
         lstream() << prefix<<"Answer says it is authoritative!"<<endl;
       }
-      
+
       std::unique_ptr<RRGen> rr;
       set<DNSName> nsses;
       multimap<DNSName, ComboAddress> addresses;
@@ -332,7 +354,7 @@ TDNSResolver::ResolveResult TDNSResolver::resolveAt(const DNSName& dn, const DNS
       /* here we loop over records. Perhaps the answer is there, perhaps
          there is a CNAME we should follow, perhaps we get a delegation.
          And if we do get a delegation, there might even be useful glue */
-      
+
       while(dmr.getRR(rrsection, rrdn, rrdt, ttl, rr)) {
         lstream() << prefix << rrsection<<" "<<rrdn<< " IN " << rrdt << " " << ttl << " " <<rr->toString()<<endl;
         if(dmr.dh.aa==1) { // authoritative answer. We trust this.
@@ -362,11 +384,11 @@ TDNSResolver::ResolveResult TDNSResolver::resolveAt(const DNSName& dn, const DNS
               else
                 lstream() <<prefix<<"in-message chase not successful, will do new query for "<<target<<endl;
             }
-                        
+
             auto chaseres=resolveAt(target, dt, depth + 1);
             ret.res = std::move(chaseres.res);
             for(auto& rr : chaseres.intermediate)   // add up their intermediates to ours
-              ret.intermediate.push_back(std::move(rr)); 
+              ret.intermediate.push_back(std::move(rr));
             return ret;
           }
         }
@@ -389,8 +411,8 @@ TDNSResolver::ResolveResult TDNSResolver::resolveAt(const DNSName& dn, const DNS
           else if(rrsection == DNSSection::Additional && nsses.count(rrdn) && (rrdt == DNSType::A || rrdt == DNSType::AAAA)) {
             // this only picks up addresses for NS records we've seen already
             // but that is ok: NS is in Authority section
-            if(rrdn.isPartOf(auth)) 
-              addresses.insert({rrdn, getIP(rr)}); 
+            if(rrdn.isPartOf(auth))
+              addresses.insert({rrdn, getIP(rr)});
             else
               lstream() << prefix << "Not accepting IP address of " << rrdn <<": out of authority of this server"<<endl;
           }
@@ -423,7 +445,7 @@ TDNSResolver::ResolveResult TDNSResolver::resolveAt(const DNSName& dn, const DNS
       // to get addresses for the rest
       lstream() << prefix<<"Don't have a resolved nameserver to ask anymore, trying to resolve "<<nsses.size()<<" names"<<endl;
       vector<DNSName> rnsses;
-      for(const auto& name: nsses) 
+      for(const auto& name: nsses)
         rnsses.push_back(name);
       std::random_device rd;
       std::mt19937 g(rd());
@@ -460,7 +482,7 @@ TDNSResolver::ResolveResult TDNSResolver::resolveAt(const DNSName& dn, const DNS
             return res2;
           // this could throw an NodataException or a NxdomainException, and we should let that fall through
           // it didn't, let's move on to the next server
-            
+
         }
       }
     }
@@ -491,12 +513,12 @@ try
   try {
 
     res = tdr.resolveAt(dn, dt);
-    
+
     cout<<"Result of query for "<< dn <<"|"<<toString(dt)<<endl;
     for(const auto& r : res.intermediate) {
       cout<<r.name <<" "<<r.ttl<<" "<<r.rr->getType()<<" " << r.rr->toString()<<endl;
     }
-    
+
     for(const auto& r : res.res) {
       cout<<r.name <<" "<<r.ttl<<" "<<r.rr->getType()<<" "<<r.rr->toString()<<endl;
     }
@@ -547,9 +569,9 @@ static nlohmann::json rrToJSON(const TDNSResolver::ResolveRR& r)
 int main(int argc, char** argv)
 try
 {
-  if(argc != 2 && argc != 3) {
-    cerr<<"Syntax: tres name type\n";
-    cerr<<"Syntax: tres ip:port\n";
+  if(argc != 5 && argc != 6) {
+    cerr<<"Syntax: tres name type ip4_src ip6_src hintsfile\n";
+    cerr<<"Syntax: tres ip:port ip4_src ip6_src hintsfile\n";
     cerr<<"\n";
     cerr<<"When name and type are specified, tres looks up a DNS record.\n";
     cerr<<"types: A, NS, CNAME, SOA, PTR, MX, TXT, AAAA, ...\n";
@@ -559,11 +581,42 @@ try
     return(EXIT_FAILURE);
   }
   signal(SIGPIPE, SIG_IGN); // TCP, so we need this
-  // configure some hints
-  multimap<DNSName, ComboAddress> hints = {{makeDNSName("a.root-servers.net"), ComboAddress("198.41.0.4", 53)},
-                                           {makeDNSName("f.root-servers.net"), ComboAddress("192.5.5.241", 53)},
-                                           {makeDNSName("k.root-servers.net"), ComboAddress("193.0.14.129", 53)},
-  };
+
+  ip4_src = ComboAddress(argv[argc-3], 0);
+  cout << "here" << endl;
+  ip6_src = ComboAddress("["+(string) argv[argc-2]+"]:0");
+
+  multimap<DNSName, ComboAddress> hints;
+
+  // Hacky way to load hints from file
+  ifstream hints_file(argv[argc-1]);
+
+  if (hints_file.is_open()) {
+    string line;
+    vector<std::string> tokens;
+    while (getline(hints_file, line)) {
+      if (line[0] == ';')
+        continue;
+      vector<std::string> tokens;
+      for (auto i = strtok(&line[0], " \t"); i != NULL; i = strtok(NULL, " \t"))
+        tokens.push_back(i);
+      if (tokens.size() >= 2) {
+        auto name = tokens.front();
+        auto ip = tokens.back();
+        if (name != ".") {
+          hints.insert({makeDNSName(name), ComboAddress(ip, 53)});
+        }
+      }
+    }
+  }
+
+  // If it fails we use the default hardcoded ones
+  if (hints.empty()) {
+    hints = {{makeDNSName("a.root-servers.net"), ComboAddress("198.41.0.4", 53)},
+             {makeDNSName("f.root-servers.net"), ComboAddress("192.5.5.241", 53)},
+             {makeDNSName("k.root-servers.net"), ComboAddress("193.0.14.129", 53)},
+    };
+  }
 
   // retrieve the actual live root NSSET from the hints
   for(const auto& h : hints) {
@@ -591,13 +644,15 @@ try
 
   cout<<"Retrieved . NSSET from hints, have "<<g_root.size()<<" addresses"<<endl;
 
-  if(argc == 2) { // be a server
+  sd_notify(0, "READY=1");
+
+  if(argc == 5) { // be a server
     ComboAddress local(argv[1], 53);
     Socket sock(local.sin4.sin_family, SOCK_DGRAM);
     SBind(sock, local);
     string packet;
     ComboAddress client;
-    
+
     for(;;) {
       try {
         packet = SRecvfrom(sock, 1500, client);
@@ -615,18 +670,18 @@ try
       }
     }
   }
-  
+
   // single shot operation
   DNSName dn = makeDNSName(argv[1]);
   DNSType dt = makeDNSType(argv[2]);
 
-  
+
   TDNSResolver tdr(g_root);
   ostringstream logstream;
   ostringstream dotstream;
   tdr.setLog(logstream);
   tdr.setPlot(dotstream);
-  
+
   auto start = chrono::high_resolution_clock::now();
 
   int rc = EXIT_SUCCESS;
@@ -635,18 +690,18 @@ try
   jres["name"]=dn.toString();
   jres["type"]=toString(dt);
   jres["intermediate"]= nlohmann::json::array();
-  jres["answer"]= nlohmann::json::array();  
+  jres["answer"]= nlohmann::json::array();
   try {
 
     auto res = tdr.resolveAt(dn, dt);
-    
+
     jres["numqueries"]=tdr.d_numqueries;
     cout<<"Result of query for "<< dn <<"|"<<toString(dt)<< " ("<<res.intermediate.size()<<" intermediate, "<<res.res.size()<<" actual)\n";
     for(const auto& r : res.intermediate) {
       jres["intermediate"].push_back(rrToJSON(r));
       cout<<r.name <<" "<<r.ttl<<" "<<r.rr->getType()<<" " << r.rr->toString()<<endl;
     }
-    
+
     for(const auto& r : res.res) {
       jres["answer"].push_back(rrToJSON(r));
       cout<<r.name <<" "<<r.ttl<<" "<<r.rr->getType()<<" "<<r.rr->toString()<<endl;
@@ -681,7 +736,7 @@ try
   jres["trace"]=logstream.str();
   auto finish = chrono::high_resolution_clock::now();
   auto msecs = chrono::duration_cast<chrono::milliseconds>(finish-start);
-  
+
   jres["msec"]= msecs.count();
   {
     tdr.endPlot();
@@ -706,7 +761,7 @@ try
 
   ofstream logfile(dn.toString()+"txt");
   logfile << logstream.str();
-  
+
   std::vector<std::uint8_t> v_cbor = nlohmann::json::to_cbor(jres);
   FILE* out = fopen("cbor", "w");
   fwrite(&v_cbor[0], 1, v_cbor.size(), out);

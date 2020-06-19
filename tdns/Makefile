@@ -23,7 +23,7 @@ tdig: tdig.o record-types.o dns-storage.o dnsmessages.o $(SIMPLESOCKET)
 	$(CXX) -std=gnu++14 $^ -o $@ -pthread
 
 tres: tres.o record-types.o dns-storage.o dnsmessages.o $(SIMPLESOCKET)
-	$(CXX) -std=gnu++14 $^ -o $@ -pthread
+	$(CXX) -std=gnu++14 $^ -o $@ -pthread -lsystemd
 
 
 tdns-c-test: tdns-c-test.o tdns-c.o record-types.o dns-storage.o dnsmessages.o $(SIMPLESOCKET)
