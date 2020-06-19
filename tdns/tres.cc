@@ -11,6 +11,8 @@
 #include "nlohmann/json.hpp"
 #include <systemd/sd-daemon.h>
 
+#include "ns_cache.hh"
+
 /*!
    @file
    @brief Teachable resolver
@@ -46,6 +48,7 @@ struct NxdomainException{};
 struct NodataException{};
 
 multimap<DNSName, ComboAddress> g_root;
+
 class TDNSResolver
 {
 public:
@@ -75,7 +78,7 @@ public:
     }
   };
 
-  ResolveResult resolveAt(const DNSName& dn, const DNSType& dt, int depth=0, const DNSName& auth={}, const multimap<DNSName, ComboAddress>& mservers=g_root);
+  ResolveResult resolveAt(const DNSName& dn, const DNSType& dt, int depth=0, const DNSName& auth={});
 
   void setPlot(ostream& fs)
   {
@@ -244,23 +247,6 @@ DNSMessageReader TDNSResolver::getResponse(const ComboAddress& server, const DNS
 }
 
 
-
-/** This takes a list of servers (in a specific order) and shuffles them to a vector.
-    This is to spread the load across nameservers
-*/
-
-static auto randomizeServers(const multimap<DNSName, ComboAddress>& mservers)
-{
-  vector<pair<DNSName, ComboAddress> > servers;
-  for(auto& sp : mservers)
-    servers.push_back(sp);
-
-  std::random_device rd;
-  std::mt19937 g(rd());
-  std::shuffle(servers.begin(), servers.end(), g);
-  return servers;
-}
-
 void TDNSResolver::dotQuery(const DNSName& auth, const DNSName& server)
 {
   if(!d_dot) return;
@@ -296,17 +282,15 @@ void TDNSResolver::dotDelegation(const DNSName& rrdn, const DNSName& server)
     root-servers.
 */
 
-TDNSResolver::ResolveResult TDNSResolver::resolveAt(const DNSName& dn, const DNSType& dt, int depth, const DNSName& auth, const multimap<DNSName, ComboAddress>& mservers)
+TDNSResolver::ResolveResult TDNSResolver::resolveAt(const DNSName& dn, const DNSType& dt, int depth, const DNSName& auth)
 {
   std::string prefix(depth, ' ');
   prefix += dn.toString() + "|"+toString(dt)+" ";
-  lstream() << prefix << "Starting query at authority = "<<auth<< ", have "<<mservers.size() << " addresses to try"<<endl;
+
+  // Unpack servers from cache
+  auto servers = get_from_cache(auth);
 
   ResolveResult ret;
-  // it is good form to sort the servers in order of response time
-  // for tres, this is not done (since we have no memory), but we do randomize:
-
-  auto servers = randomizeServers(mservers);
 
   for(auto& sp : servers) {
     dotQuery(auth, sp.first);
@@ -402,6 +386,7 @@ TDNSResolver::ResolveResult TDNSResolver::resolveAt(const DNSName& dn, const DNS
               if(!dmr.dh.aa && (newAuth != rrdn || nsses.empty())) {
                 dotDelegation(rrdn, sp.first);
               }
+              save_to_cache(rrdn, nsname, ComboAddress());
               nsses.insert(nsname);
               newAuth = rrdn;
             }
@@ -411,8 +396,10 @@ TDNSResolver::ResolveResult TDNSResolver::resolveAt(const DNSName& dn, const DNS
           else if(rrsection == DNSSection::Additional && nsses.count(rrdn) && (rrdt == DNSType::A || rrdt == DNSType::AAAA)) {
             // this only picks up addresses for NS records we've seen already
             // but that is ok: NS is in Authority section
-            if(rrdn.isPartOf(auth))
+            if(rrdn.isPartOf(auth)) {
               addresses.insert({rrdn, getIP(rr)});
+              save_to_cache(newAuth, rrdn, getIP(rr));
+            }
             else
               lstream() << prefix << "Not accepting IP address of " << rrdn <<": out of authority of this server"<<endl;
           }
@@ -435,10 +422,18 @@ TDNSResolver::ResolveResult TDNSResolver::resolveAt(const DNSName& dn, const DNS
         for(const auto& p : addresses)
           lstream() << p.first <<"="<<p.second.toString()<<" ";
         lstream() <<endl;
-        auto res2=resolveAt(dn, dt, depth+1, newAuth, addresses);
+        auto res2=resolveAt(dn, dt, depth+1, newAuth);
         if(!res2.res.empty())
           return res2;
         lstream() << prefix<<"The IP addresses we had did not provide a good answer"<<endl;
+      }
+
+      for (auto ns : nsses) {
+        if (is_cached(ns)) {
+          auto ret = resolveAt(dn, dt, depth+1, newAuth);
+          if(!ret.res.empty())
+            return ret;
+        }
       }
 
       // well we could not make it work using the servers we had addresses for. Let's try
@@ -459,8 +454,10 @@ TDNSResolver::ResolveResult TDNSResolver::resolveAt(const DNSName& dn, const DNS
           try {
             auto result = resolveAt(name, qtype, depth+1);
             lstream() << prefix<<"Got "<<result.res.size()<<" nameserver " << qtype <<" addresses, adding to list"<<endl;
-            for(const auto& res : result.res)
+            for(const auto& res : result.res) {
               newns.insert({name, getIP(res.rr)});
+              save_to_cache(newAuth, name, getIP(res.rr));
+            }
             lstream() << prefix<<"We now have "<<newns.size()<<" resolved " << qtype<<" addresses to try"<<endl;
             if(newns.empty())
               continue;
@@ -477,7 +474,7 @@ TDNSResolver::ResolveResult TDNSResolver::resolveAt(const DNSName& dn, const DNS
             continue;
           }
           // we have a new (set) of addresses to try
-          auto res2 = resolveAt(dn, dt, depth+1, newAuth, newns);
+          auto res2 = resolveAt(dn, dt, depth+1, newAuth);
           if(!res2.res.empty()) // it worked!
             return res2;
           // this could throw an NodataException or a NxdomainException, and we should let that fall through
@@ -634,8 +631,10 @@ try
       // we could check with the NS records if we wanted
       // but if a root wants to mess with us, it can
       while(dmr.getRR(rrsection, rrdn, rrdt, ttl, rr)) {
-        if(rrdt == DNSType::A || rrdt == DNSType::AAAA)
+        if(rrdt == DNSType::A || rrdt == DNSType::AAAA) {
           g_root.insert({rrdn, getIP(rr)});
+          save_to_cache(makeDNSName("."), rrdn, getIP(rr));
+        }
       }
       break;
     }
