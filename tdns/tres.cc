@@ -12,6 +12,7 @@
 #include <systemd/sd-daemon.h>
 
 #include "ns_cache.hh"
+#include "selection.hh"
 
 /*!
    @file
@@ -287,24 +288,48 @@ TDNSResolver::ResolveResult TDNSResolver::resolveAt(const DNSName& dn, const DNS
   std::string prefix(depth, ' ');
   prefix += dn.toString() + "|"+toString(dt)+" ";
 
-  // Unpack servers from cache
-  auto servers = get_from_cache(auth);
-
   ResolveResult ret;
 
-  for(auto& sp : servers) {
-    dotQuery(auth, sp.first);
+  auto selection = Selection(auth);
+  while(true) {
+    transport choice = selection.get_transport();
 
-    ret.clear();
-    ComboAddress server=sp.second;
-    server.sin4.sin_port = htons(53); // just to be sure
+    if (choice.address == NO_IP) {
+      // resolve choice.name as it is needed
+      for(const DNSType& qtype : {DNSType::A, DNSType::AAAA}) {
+        try {
+          auto result = resolveAt(choice.name, qtype, depth+1);
+          lstream() << prefix<<"Got "<<result.res.size()<<" nameserver " << qtype <<" addresses, adding to cache"<<endl;
+          for(const auto& res : result.res) {
+            save_to_cache(auth, choice.name, getIP(res.rr));
+          }
+        }
+        catch(std::exception& e)
+        {
+          lstream() << prefix <<"Failed to resolve name for "<<choice.name<<"|"<<qtype<<": "<<e.what()<<endl;
 
-    if(d_skipIPv6 && server.sin4.sin_family == AF_INET6)
-      continue;
-    try {
-      lstream() << prefix<<"Sending to server "<<sp.first<<" on "<<server.toString()<<endl;
+          if(qtype == DNSType::A)
+            selection.error(choice, CANT_RESOLVE_A);
+          else
+            selection.error(choice, CANT_RESOLVE_AAAA);
 
-      DNSMessageReader dmr = getResponse(server, dn, dt, depth); // takes care of EDNS and TCP for us
+          continue;
+        }
+        catch(...)
+        {
+          lstream() << prefix <<"Failed to resolve name for "<<choice.name<<"|"<<qtype<<endl;
+          continue;
+        }
+      }
+    } else {
+      // send query to choice.address
+      dotQuery(auth, choice.name);
+      choice.address.sin4.sin_port = htons(53);
+
+      //try {
+      lstream() << prefix<<"Sending to server "<<choice.name<<" on "<<choice.address.toString()<<endl;
+
+      DNSMessageReader dmr = getResponse(choice.address, dn, dt, depth); // takes care of EDNS and TCP for us
 
       DNSSection rrsection;
       uint32_t ttl;
@@ -333,7 +358,6 @@ TDNSResolver::ResolveResult TDNSResolver::resolveAt(const DNSName& dn, const DNS
 
       std::unique_ptr<RRGen> rr;
       set<DNSName> nsses;
-      multimap<DNSName, ComboAddress> addresses;
 
       /* here we loop over records. Perhaps the answer is there, perhaps
          there is a CNAME we should follow, perhaps we get a delegation.
@@ -344,14 +368,14 @@ TDNSResolver::ResolveResult TDNSResolver::resolveAt(const DNSName& dn, const DNS
         if(dmr.dh.aa==1) { // authoritative answer. We trust this.
           if(rrsection == DNSSection::Answer && dn == rrdn && dt == rrdt) {
             lstream() << prefix<<"We got an answer to our question!"<<endl;
-            dotAnswer(dn, rrdt, sp.first);
+            dotAnswer(dn, rrdt, choice.name);
             ret.res.push_back({dn, ttl, std::move(rr)});
           }
           else if(dn == rrdn && rrdt == DNSType::CNAME) {
             DNSName target = dynamic_cast<CNAMEGen*>(rr.get())->d_name;
             ret.intermediate.push_back({dn, ttl, std::move(rr)}); // rr is DEAD now!
             lstream() << prefix<<"We got a CNAME to " << target <<", chasing"<<endl;
-            dotCNAME(target, sp.first, dn);
+            dotCNAME(target, choice.name, dn);
             if(target.isPartOf(auth)) { // this points to something we consider this server auth for
               lstream() << prefix << "target " << target << " is within " << auth<<", harvesting from packet"<<endl;
               bool hadMatch=false;      // perhaps the answer is in this DNS message
@@ -384,9 +408,9 @@ TDNSResolver::ResolveResult TDNSResolver::resolveAt(const DNSName& dn, const DNS
               DNSName nsname = dynamic_cast<NSGen*>(rr.get())->d_name;
 
               if(!dmr.dh.aa && (newAuth != rrdn || nsses.empty())) {
-                dotDelegation(rrdn, sp.first);
+                dotDelegation(rrdn, choice.name);
               }
-              save_to_cache(rrdn, nsname, ComboAddress());
+              save_to_cache(rrdn, nsname, NO_IP);
               nsses.insert(nsname);
               newAuth = rrdn;
             }
@@ -396,8 +420,8 @@ TDNSResolver::ResolveResult TDNSResolver::resolveAt(const DNSName& dn, const DNS
           else if(rrsection == DNSSection::Additional && nsses.count(rrdn) && (rrdt == DNSType::A || rrdt == DNSType::AAAA)) {
             // this only picks up addresses for NS records we've seen already
             // but that is ok: NS is in Authority section
+            cout << "is" << rrdn << " part of " << auth << endl;
             if(rrdn.isPartOf(auth)) {
-              addresses.insert({rrdn, getIP(rr)});
               save_to_cache(newAuth, rrdn, getIP(rr));
             }
             else
@@ -414,79 +438,21 @@ TDNSResolver::ResolveResult TDNSResolver::resolveAt(const DNSName& dn, const DNS
         lstream() << prefix <<"No data response"<<endl;
         throw NodataException();
       }
-      // we got a delegation
+      // we saved the delegation to cache, try the next query
       lstream() << prefix << "We got delegated to " << nsses.size() << " " << newAuth << " nameserver names " << endl;
-      if(!addresses.empty()) {
-        // in addresses are nameservers for which we have IP or IPv6 addresses
-        lstream() << prefix<<"Have "<<addresses.size()<<" IP addresses to iterate to: ";
-        for(const auto& p : addresses)
-          lstream() << p.first <<"="<<p.second.toString()<<" ";
-        lstream() <<endl;
-        auto res2=resolveAt(dn, dt, depth+1, newAuth);
-        if(!res2.res.empty())
-          return res2;
-        lstream() << prefix<<"The IP addresses we had did not provide a good answer"<<endl;
-      }
 
-      for (auto ns : nsses) {
-        if (is_cached(ns)) {
-          auto ret = resolveAt(dn, dt, depth+1, newAuth);
-          if(!ret.res.empty())
-            return ret;
-        }
-      }
+      auto res2=resolveAt(dn, dt, depth+1, newAuth);
+      if(!res2.res.empty())
+        return res2;
+      lstream() << prefix<<"The IP addresses we had did not provide a good answer"<<endl;
+      //}
 
-      // well we could not make it work using the servers we had addresses for. Let's try
-      // to get addresses for the rest
-      lstream() << prefix<<"Don't have a resolved nameserver to ask anymore, trying to resolve "<<nsses.size()<<" names"<<endl;
-      vector<DNSName> rnsses;
-      for(const auto& name: nsses)
-        rnsses.push_back(name);
-      std::random_device rd;
-      std::mt19937 g(rd());
-      std::shuffle(rnsses.begin(), rnsses.end(), g);
-
-      for(const auto& name: rnsses) {
-        for(const DNSType& qtype : {DNSType::A, DNSType::AAAA}) {
-          multimap<DNSName, ComboAddress> newns;
-          lstream() << prefix<<"Attempting to resolve NS " <<name<< "|"<<qtype<<endl;
-
-          try {
-            auto result = resolveAt(name, qtype, depth+1);
-            lstream() << prefix<<"Got "<<result.res.size()<<" nameserver " << qtype <<" addresses, adding to list"<<endl;
-            for(const auto& res : result.res) {
-              newns.insert({name, getIP(res.rr)});
-              save_to_cache(newAuth, name, getIP(res.rr));
-            }
-            lstream() << prefix<<"We now have "<<newns.size()<<" resolved " << qtype<<" addresses to try"<<endl;
-            if(newns.empty())
-              continue;
-          }
-          catch(std::exception& e)
-          {
-            lstream() << prefix <<"Failed to resolve name for "<<name<<"|"<<qtype<<": "<<e.what()<<endl;
-            continue;
-          }
-
-          catch(...)
-          {
-            lstream() << prefix <<"Failed to resolve name for "<<name<<"|"<<qtype<<endl;
-            continue;
-          }
-          // we have a new (set) of addresses to try
-          auto res2 = resolveAt(dn, dt, depth+1, newAuth);
-          if(!res2.res.empty()) // it worked!
-            return res2;
-          // this could throw an NodataException or a NxdomainException, and we should let that fall through
-          // it didn't, let's move on to the next server
-
-        }
-      }
-    }
-    catch(std::exception& e) {
-      lstream() << prefix <<"Error resolving: " << e.what() << endl;
+      // catch(std::exception& e) {
+      //   lstream() << prefix <<"Error resolving: " << e.what() << endl;
+      // }
     }
   }
+
   // if we get here, we have no results for you.
   return ret;
 }
