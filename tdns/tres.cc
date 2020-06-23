@@ -176,6 +176,19 @@ DNSMessageReader TDNSResolver::getResponse(const ComboAddress& server, const DNS
     double timeout=1.0;
     if(doTCP) {
       Socket sock(server.sin4.sin_family, SOCK_STREAM);
+      if (server.isIPv4()) {
+        if (ip4_src != ComboAddress("0.0.0.0:0")) {
+          ip4_src.setPort(get_next_ip4_port());
+          SBind(sock, ip4_src);
+          cout << "ip4_src set";
+        }
+      } else {
+        if (ip6_src != ComboAddress("[::]:0")) {
+          ip6_src.setPort(get_next_ip6_port());
+          SBind(sock, ip6_src);
+          cout << "ip6_src set";
+        }
+      }
       SConnect(sock, server);
       string ser = dmw.serialize();
       uint16_t len = htons(ser.length());
@@ -205,6 +218,19 @@ DNSMessageReader TDNSResolver::getResponse(const ComboAddress& server, const DNS
     }
     else {
       Socket sock(server.sin4.sin_family, SOCK_DGRAM);
+      if (server.isIPv4()) {
+        if (ip4_src != ComboAddress("0.0.0.0:0")) {
+          ip4_src.setPort(get_next_ip4_port());
+          SBind(sock, ip4_src);
+          cout << "ip4_src set";
+        }
+      } else {
+        if (ip6_src != ComboAddress("[::]:0")) {
+          ip6_src.setPort(get_next_ip6_port());
+          SBind(sock, ip6_src);
+          cout << "ip6_src set";
+        }
+      }
       SConnect(sock, server);
       SWrite(sock, dmw.serialize());
 
