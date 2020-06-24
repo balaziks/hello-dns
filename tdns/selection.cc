@@ -46,14 +46,15 @@ transport Selection::get_transport() {
         // This can be replaced by adding random small values to timeout when inicializing GlobalState
         shuffle(with_ip.begin(), with_ip.end(), g);
 
-        // Sort by local server state (now only errors) primarily (broken servers in the back) and by timeout secondarily
+        // Sort by local server state (now only errors) primarily (broken servers in the back) and by rtt secondarily
         stable_sort(with_ip.begin(), with_ip.end(), [](const server &a, const server &b) {
-            return selection_cache[a.second].timeout < selection_cache[b.second].timeout;});
+            return selection_cache[a.second].get_timeout() < selection_cache[b.second].get_timeout();});
+
         stable_sort(with_ip.begin(), with_ip.end(), [this](const server &a, const server &b) {
             return this->local_state[a].errors < this->local_state[b].errors;});
 
         for (auto server : with_ip)
-            cout << local_state[server].errors << " " << selection_cache[server.second].rtt_estimate/1000 << " ms\t\t" << server.first << "\t" << server.second.toString() << " " << endl;
+            cout << local_state[server].errors << " " << selection_cache[server.second].timeout/1000 << " ms\t\t" << server.first << "\t" << server.second.toString() << " " << endl;
 
         // Best RTT over servers with minimal number of errors
         server choice = with_ip.at(0);
@@ -93,7 +94,7 @@ void Selection::error(transport choice, SelectionError error) {
     switch (error)
     {
     case TIMEOUT:
-        // we handle timeout separetly
+        timeout(choice);
         return;
 
     case TRUNCATED:
@@ -111,6 +112,7 @@ void Selection::error(transport choice, SelectionError error) {
 
     case FORMERROR:
         // we could do something with EDNS but we don't
+        // no return
 
     default:
         local_state[choice.getServer()].errors++;

@@ -8,76 +8,55 @@
 #include "record-types.hh"
 #include "ns_cache.hh"
 
-
-
 using namespace std;
 
 typedef pair<DNSName, ComboAddress> server;
 
-const unsigned int MILLISECOND = 1000;
-const unsigned int SECOND = 1000 * MILLISECOND;
+const int MILLISECOND = 1000;
+const int SECOND = 1000 * MILLISECOND;
 
-const int DEFAULT_TIMEOUT = 200 * MILLISECOND;
-
-// These should definitely be configurable, for now taken from Unbound
-const int MIN_TIMEOUT = 50 * MILLISECOND;
+const int MIN_TIMEOUT = 1 * MILLISECOND;
 const int MAX_TIMEOUT = 12 * SECOND;
 
-struct GlobalServerState { // Models an exponencial moving average (no decaying)
+struct GlobalServerState {
     int rtt_estimate = 0; // microseconds
-    int rtt_variance = 0;
-    int timeout = DEFAULT_TIMEOUT;
-    bool backed_off = false;
-    chrono::time_point<chrono::steady_clock> last_update = chrono::time_point<chrono::steady_clock>();
+    int rtt_variance = 376 * MILLISECOND / 4;
+    int timeout = calculate_timeout();
 
-    void update(unsigned int new_rtt) {
-        auto now = chrono::steady_clock::now();
-        if(rtt_estimate == 0) {
-            rtt_estimate = new_rtt;
-            last_update = now;
-        } else {
-            chrono::duration<float> time_delta = now - last_update; // in seconds
-            cout << "time since last update " << time_delta.count() << endl;
-
-            // Factor calculation from PowerDNS
-            double factor = expf(-time_delta.count())/2.0f; // factor -> 0.5 as time_delta -> 0+
-            cout << "updating with factor " << factor;
-            last_update = now;
-            cout << " from " << rtt_estimate/1000 << " ms ";
-            int old_estimate = rtt_estimate;
-            rtt_estimate = rtt_estimate * factor + new_rtt * (1 - factor);
-            cout << " to " << rtt_estimate/1000 << " ms" << endl;
-            int rtt_delta = old_estimate - rtt_estimate;
-            rtt_variance = (1 - factor) * (rtt_variance + factor * factor * rtt_delta * rtt_delta);
-
-            update_timeout();
-        }
-    }
-
-    int update_timeout() {
-        // Timeout calculation from RFC6298
-        int timeout = rtt_estimate + 4 * rtt_variance;
-
-        if (timeout < MIN_TIMEOUT) {
-            return MIN_TIMEOUT;
-        }
-        if (timeout > MAX_TIMEOUT) {
-            return MAX_TIMEOUT;
-        }
-        return timeout;
+    void update(int new_rtt) {
+        int delta = rtt_estimate - new_rtt;
+        rtt_estimate += delta/8;
+        rtt_variance += (abs(delta) - rtt_variance) / 4;
+        timeout = calculate_timeout();
     }
 
     void packet_lost() {
         // This will get more interesting when we accept for outstanding answers after retransmit
+        // See https://github.com/NLnetLabs/unbound/blob/4bf9d124190470b8a46439f569f1e72457222930/util/rtt.c#L100 for example
         // But in tres we can't so we don't :)
         // So for now we just backoff exponentially
-        backed_off = true;
 
-        int new_timeout = timeout * 2;
-        if (new_timeout > MAX_TIMEOUT)
+        timeout *= 2;
+        if (timeout > MAX_TIMEOUT)
             timeout = MAX_TIMEOUT;
-        else
-            timeout = new_timeout;
+
+    }
+
+    int calculate_timeout() {
+        int to = rtt_estimate + 4 * rtt_variance;
+        if (to < MIN_TIMEOUT)
+            return MIN_TIMEOUT;
+        if (to > MAX_TIMEOUT)
+            return MAX_TIMEOUT;
+        return to;
+    }
+
+    int get_timeout() {
+        if (calculate_timeout() != timeout) {
+            // we have backed off or fell back
+            return timeout;
+        }
+        return rtt_estimate + 4 * rtt_variance;
     }
 
 

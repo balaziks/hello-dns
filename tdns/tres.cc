@@ -350,6 +350,7 @@ TDNSResolver::ResolveResult TDNSResolver::resolveAt(const DNSName& dn, const DNS
       DNSMessageReader dmr;
       auto start = chrono::steady_clock::now();
       double timeout = 1.0 * choice.timeout / 1000000; // conversion to seconds
+      cout << timeout << endl;
       try {
         dmr = getResponse(choice.address, dn, dt, timeout, choice.TCP, depth);
         auto finish = chrono::steady_clock::now();
@@ -360,6 +361,7 @@ TDNSResolver::ResolveResult TDNSResolver::resolveAt(const DNSName& dn, const DNS
       catch (SelectionError e) {
         auto finish = chrono::steady_clock::now();
         auto duration = chrono::duration_cast<chrono::microseconds>(finish-start);
+        cout << "============ error code " << e << endl;
         selection.error(choice, e);
         if (e != TIMEOUT && e != SOCKET) {
           // selection.rtt(choice, 0); // some kind of error on socket or timeout, no point in reporting rtt
