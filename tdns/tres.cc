@@ -101,7 +101,7 @@ public:
   ~TDNSResolver()
   {
   }
-  DNSMessageReader getResponse(const ComboAddress& server, const DNSName& dn, const DNSType& dt, int depth=0);
+  DNSMessageReader getResponse(const ComboAddress& server, const DNSName& dn, const DNSType& dt, double timeout, bool doTCP = false, int depth=0);
 private:
   void dotQuery(const DNSName& auth, const DNSName& server);
   void dotAnswer(const DNSName& dn, const DNSType& rrdt, const DNSName& server);
@@ -149,128 +149,120 @@ static ComboAddress getIP(const std::unique_ptr<RRGen>& rr)
     This function does check if the ID field of the response matches the query, but the caller should
     check qname and qtype.
 */
-DNSMessageReader TDNSResolver::getResponse(const ComboAddress& server, const DNSName& dn, const DNSType& dt, int depth)
+DNSMessageReader TDNSResolver::getResponse(const ComboAddress& server, const DNSName& dn, const DNSType& dt, double timeout, bool doTCP, int depth)
 {
-  // quick hack to prevent us from hammering dead servers
-  static thread_local map<std::tuple<ComboAddress, DNSName, DNSType>, int> skips;
   std::string prefix(depth, ' ');
   prefix += dn.toString() + "|"+toString(dt)+" ";
 
-  auto skipiter = skips.find(std::tie(server,dn,dt));
-  if(skipiter != skips.end() && skipiter->second > 3) {
-    throw std::runtime_error("Skipping query to "+server.toString()+": failed before");
+  bool doEDNS=true;
+
+  if(++d_numqueries > d_maxqueries) // there is the possibility our algorithm will loop
+    throw TooManyQueriesException(); // and send out thousands of queries, so let's not
+
+  DNSMessageWriter dmw(dn, dt);
+  dmw.dh.rd = false;
+  dmw.randomizeID();
+  if(doEDNS)
+    dmw.setEDNS(1500, false);  // no DNSSEC for now, 1500 byte buffer size
+  string resp;
+
+  if(doTCP) {
+    Socket sock(server.sin4.sin_family, SOCK_STREAM);
+    if (server.isIPv4()) {
+      if (ip4_src != ComboAddress("0.0.0.0:0")) {
+        ip4_src.setPort(get_next_ip4_port());
+        SBind(sock, ip4_src);
+      }
+    } else {
+      if (ip6_src != ComboAddress("[::]:0")) {
+        ip6_src.setPort(get_next_ip6_port());
+        SBind(sock, ip6_src);
+      }
+    }
+    SConnect(sock, server);
+    string ser = dmw.serialize();
+    uint16_t len = htons(ser.length());
+    string tmp((char*)&len, 2);
+    SWrite(sock, tmp);
+    SWrite(sock, ser);
+
+    int err = waitForData(sock, &timeout);
+
+    if( err <= 0) {
+      if(!err) d_numtimeouts++;
+      throw std::runtime_error("Error waiting for data from "+server.toStringWithPort()+": "+ (err ? string(strerror(errno)): string("Timeout")));
+    }
+
+    tmp=SRead(sock, 2);
+    len = ntohs(*((uint16_t*)tmp.c_str()));
+
+    // so yes, you need to check for a timeout here again!
+    err = waitForData(sock, &timeout);
+
+    if( err <= 0) {
+      if(!err) d_numtimeouts++;
+      throw std::runtime_error("Error waiting for data from "+server.toStringWithPort()+": "+ (err ? string(strerror(errno)): string("Timeout")));
+    }
+    // and even this is not good enough, an authoritative server could be trickling us bytes
+    resp = SRead(sock, len);
+  }
+  else {
+    Socket sock(server.sin4.sin_family, SOCK_DGRAM);
+    if (server.isIPv4()) {
+      if (ip4_src != ComboAddress("0.0.0.0:0")) {
+        ip4_src.setPort(get_next_ip4_port());
+        SBind(sock, ip4_src);
+      }
+    } else {
+      if (ip6_src != ComboAddress("[::]:0")) {
+        ip6_src.setPort(get_next_ip6_port());
+        SBind(sock, ip6_src);
+      }
+    }
+    SConnect(sock, server);
+    SWrite(sock, dmw.serialize());
+
+    int err = waitForData(sock, &timeout);
+
+    // so one could simply retry on a timeout, but here we don't
+    if( err <= 0) {
+
+      if(!err) {
+        d_numtimeouts++;
+        throw SelectionError(TIMEOUT);
+      }
+      throw SelectionError(SOCKET);
+      // throw std::runtime_error("Error waiting for data from "+server.toStringWithPort()+": "+ (err ? string(strerror(errno)): string("Timeout")));
+    }
+    ComboAddress ign=server;
+    resp = SRecvfrom(sock, 65535, ign);
   }
 
-  bool doEDNS=true, doTCP=false;
-
-  for(int tries = 0; tries < 4 ; ++tries) {
-    if(++d_numqueries > d_maxqueries) // there is the possibility our algorithm will loop
-      throw TooManyQueriesException(); // and send out thousands of queries, so let's not
-
-    DNSMessageWriter dmw(dn, dt);
-    dmw.dh.rd = false;
-    dmw.randomizeID();
-    if(doEDNS)
-      dmw.setEDNS(1500, false);  // no DNSSEC for now, 1500 byte buffer size
-    string resp;
-    double timeout=1.0;
-    if(doTCP) {
-      Socket sock(server.sin4.sin_family, SOCK_STREAM);
-      if (server.isIPv4()) {
-        if (ip4_src != ComboAddress("0.0.0.0:0")) {
-          ip4_src.setPort(get_next_ip4_port());
-          SBind(sock, ip4_src);
-          cout << "ip4_src set";
-        }
-      } else {
-        if (ip6_src != ComboAddress("[::]:0")) {
-          ip6_src.setPort(get_next_ip6_port());
-          SBind(sock, ip6_src);
-          cout << "ip6_src set";
-        }
-      }
-      SConnect(sock, server);
-      string ser = dmw.serialize();
-      uint16_t len = htons(ser.length());
-      string tmp((char*)&len, 2);
-      SWrite(sock, tmp);
-      SWrite(sock, ser);
-
-      int err = waitForData(sock, &timeout);
-
-      if( err <= 0) {
-        if(!err) d_numtimeouts++;
-        throw std::runtime_error("Error waiting for data from "+server.toStringWithPort()+": "+ (err ? string(strerror(errno)): string("Timeout")));
-      }
-
-      tmp=SRead(sock, 2);
-      len = ntohs(*((uint16_t*)tmp.c_str()));
-
-      // so yes, you need to check for a timeout here again!
-      err = waitForData(sock, &timeout);
-
-      if( err <= 0) {
-        if(!err) d_numtimeouts++;
-        throw std::runtime_error("Error waiting for data from "+server.toStringWithPort()+": "+ (err ? string(strerror(errno)): string("Timeout")));
-      }
-      // and even this is not good enough, an authoritative server could be trickling us bytes
-      resp = SRead(sock, len);
-    }
-    else {
-      Socket sock(server.sin4.sin_family, SOCK_DGRAM);
-      if (server.isIPv4()) {
-        if (ip4_src != ComboAddress("0.0.0.0:0")) {
-          ip4_src.setPort(get_next_ip4_port());
-          SBind(sock, ip4_src);
-          cout << "ip4_src set";
-        }
-      } else {
-        if (ip6_src != ComboAddress("[::]:0")) {
-          ip6_src.setPort(get_next_ip6_port());
-          SBind(sock, ip6_src);
-          cout << "ip6_src set";
-        }
-      }
-      SConnect(sock, server);
-      SWrite(sock, dmw.serialize());
-
-      int err = waitForData(sock, &timeout);
-
-      // so one could simply retry on a timeout, but here we don't
-      if( err <= 0) {
-        skips[std::tie(server,dn,dt)]++;
-        if(!err) d_numtimeouts++;
-
-        throw std::runtime_error("Error waiting for data from "+server.toStringWithPort()+": "+ (err ? string(strerror(errno)): string("Timeout")));
-      }
-      ComboAddress ign=server;
-      resp = SRecvfrom(sock, 65535, ign);
-    }
-    skips.erase(std::tie(server,dn,dt));
-    DNSMessageReader dmr(resp);
-    if(dmr.dh.id != dmw.dh.id) {
-      lstream() << prefix << "ID mismatch on answer" << endl;
-      continue;
-    }
-    if(!dmr.dh.qr) { // for security reasons, you really need this
-      lstream() << prefix << "What we received was not a response, ignoring"<<endl;
-      continue;
-    }
-    if((RCode)dmr.dh.rcode == RCode::Formerr) { // XXX this should check that there is no OPT in the response
-      lstream() << prefix <<"Got a Formerr, resending without EDNS"<<endl;
-      doEDNS=false;
-      d_numformerrs++;
-      continue;
-    }
-    if(dmr.dh.tc) {
-      lstream() << prefix <<"Got a truncated answer, retrying over TCP"<<endl;
-      doTCP=true;
-      continue;
-    }
-    return dmr;
+  DNSMessageReader dmr;
+  try {
+    dmr = DNSMessageReader(resp);
   }
-  // should never get here
-  return DNSMessageReader(""); // just to make compiler happy
+  catch (const std::runtime_error &) {
+    // Parse error
+    throw SelectionError(INVALID_ANSWER);
+  }
+  if(dmr.dh.id != dmw.dh.id) {
+    lstream() << prefix << "ID mismatch on answer" << endl;
+    throw SelectionError(INVALID_ANSWER);
+  }
+  if(!dmr.dh.qr) { // for security reasons, you really need this
+    lstream() << prefix << "What we received was not a response, ignoring"<<endl;
+    throw SelectionError(INVALID_ANSWER);
+  }
+  if((RCode)dmr.dh.rcode == RCode::Formerr) { // XXX this should check that there is no OPT in the response
+    lstream() << prefix <<"Got a Formerr"<<endl;
+    throw SelectionError(FORMERROR);
+  }
+  if(dmr.dh.tc) {
+    lstream() << prefix <<"Got a truncated answer"<<endl;
+    throw SelectionError(TRUNCATED);
+  }
+  return dmr;
 }
 
 
@@ -352,10 +344,30 @@ TDNSResolver::ResolveResult TDNSResolver::resolveAt(const DNSName& dn, const DNS
       dotQuery(auth, choice.name);
       choice.address.sin4.sin_port = htons(53);
 
-      //try {
+      try {
       lstream() << prefix<<"Sending to server "<<choice.name<<" on "<<choice.address.toString()<<endl;
 
-      DNSMessageReader dmr = getResponse(choice.address, dn, dt, depth); // takes care of EDNS and TCP for us
+      DNSMessageReader dmr;
+      auto start = chrono::steady_clock::now();
+      double timeout = 1.0 * choice.timeout / 1000000; // conversion to seconds
+      try {
+        dmr = getResponse(choice.address, dn, dt, timeout, choice.TCP, depth);
+        auto finish = chrono::steady_clock::now();
+        auto duration = chrono::duration_cast<chrono::microseconds>(finish-start);
+        selection.success(choice);
+        selection.rtt(choice, duration.count());
+      }
+      catch (SelectionError e) {
+        auto finish = chrono::steady_clock::now();
+        auto duration = chrono::duration_cast<chrono::microseconds>(finish-start);
+        selection.error(choice, e);
+        if (e != TIMEOUT && e != SOCKET) {
+          // selection.rtt(choice, 0); // some kind of error on socket or timeout, no point in reporting rtt
+        } else {
+          selection.rtt(choice, duration.count());
+        }
+        continue;
+      }
 
       DNSSection rrsection;
       uint32_t ttl;
@@ -471,11 +483,11 @@ TDNSResolver::ResolveResult TDNSResolver::resolveAt(const DNSName& dn, const DNS
       if(!res2.res.empty())
         return res2;
       lstream() << prefix<<"The IP addresses we had did not provide a good answer"<<endl;
-      //}
+      }
 
-      // catch(std::exception& e) {
-      //   lstream() << prefix <<"Error resolving: " << e.what() << endl;
-      // }
+      catch(std::exception& e) {
+        lstream() << prefix <<"Error resolving: " << e.what() << endl;
+      }
     }
   }
 
@@ -611,7 +623,8 @@ try
   for(const auto& h : hints) {
     try {
       TDNSResolver tdr;
-      DNSMessageReader dmr = tdr.getResponse(h.second, makeDNSName("."), DNSType::NS);
+      // XXX if the root servers aren't available via UDP, tough luck
+      DNSMessageReader dmr = tdr.getResponse(h.second, makeDNSName("."), DNSType::NS, 1.0);
       DNSSection rrsection;
       DNSName rrdn;
       DNSType rrdt;
@@ -673,7 +686,7 @@ try
   tdr.setLog(logstream);
   tdr.setPlot(dotstream);
 
-  auto start = chrono::high_resolution_clock::now();
+  auto start = chrono::steady_clock::now();
 
   int rc = EXIT_SUCCESS;
 
@@ -725,7 +738,7 @@ try
   jres["numtimeouts"]=tdr.d_numtimeouts;
   jres["numformerrs"]=tdr.d_numformerrs;
   jres["trace"]=logstream.str();
-  auto finish = chrono::high_resolution_clock::now();
+  auto finish = chrono::steady_clock::now();
   auto msecs = chrono::duration_cast<chrono::milliseconds>(finish-start);
 
   jres["msec"]= msecs.count();

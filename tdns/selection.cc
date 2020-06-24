@@ -1,6 +1,6 @@
 #include "selection.hh"
 
-map<ComboAddress, GlobalState> selection_cache;
+map<ComboAddress, GlobalServerState> selection_cache;
 
 struct SelectionException : public std::exception {
     const char * what () const throw ()
@@ -10,14 +10,16 @@ struct SelectionException : public std::exception {
 };
 
 transport Selection::get_transport() {
-    auto servers = get_from_cache(zonecut);
+    double epsilon = 0.5;
 
-    if (!servers.size()) {
-        throw SelectionException();
-    }
+    auto servers = get_from_cache(zonecut);
 
     vector<server> with_ip;
     vector<server> without_ip;
+
+    // We tried to resolve this name but we failed so there is no point in trying again, I guess
+    // https://en.wikipedia.org/wiki/Erase%E2%80%93remove_idiom
+    servers.erase(remove_if(servers.begin(), servers.end(), [this](server s){return this->local_state[s].cantResolveName();}), servers.end());
 
     for(auto server : servers) {
         if(server.second == NO_IP) {
@@ -27,36 +29,48 @@ transport Selection::get_transport() {
         }
     }
 
+    if (!servers.size()) {
+        // No servers left. :(
+        throw SelectionException();
+    }
+
     random_device rd;
     mt19937 g(rd());
 
-    if(with_ip.size()) {
-        // choose randomly for now
+    std::uniform_real_distribution<> dis = std::uniform_real_distribution<>(0.0, 1.0);
+
+    if(dis(g) > epsilon && with_ip.size()) {
+        cout << "EXPLOIT!" << endl;
+
+        // Shuffle to randomize order in the beginning (where all timeouts are MIN_TIMEOUT)
+        // This can be replaced by adding random small values to timeout when inicializing GlobalState
         shuffle(with_ip.begin(), with_ip.end(), g);
 
+        // Sort by local server state (now only errors) primarily (broken servers in the back) and by timeout secondarily
+        stable_sort(with_ip.begin(), with_ip.end(), [](const server &a, const server &b) {
+            return selection_cache[a.second].timeout < selection_cache[b.second].timeout;});
+        stable_sort(with_ip.begin(), with_ip.end(), [this](const server &a, const server &b) {
+            return this->local_state[a].errors < this->local_state[b].errors;});
+
+        for (auto server : with_ip)
+            cout << local_state[server].errors << " " << selection_cache[server.second].rtt_estimate/1000 << " ms\t\t" << server.first << "\t" << server.second.toString() << " " << endl;
+
+        // Best RTT over servers with minimal number of errors
         server choice = with_ip.at(0);
-
-        // Also resolve some other NS name (does nothing for now)
-        if (without_ip.size()) {
-            shuffle(without_ip.begin(), without_ip.end(), g);
-            resolve_ns(without_ip.at(0).first);
-        }
-
-        local_state[choice].udp_tries++;
 
         return {.name = choice.first,
                 .address = choice.second,
-                .TCP = false,
-                .timeout = 200
+                .TCP = doTCP,
+                .timeout = selection_cache[choice.second].timeout,
                };
     } else {
-        // We have no NS with IP
-        shuffle(without_ip.begin(), without_ip.end(), g);
-        server choice = without_ip.at(0);
+        cout << "EXPLORE!" << endl;
+        shuffle(servers.begin(), servers.end(), g);
+        server choice = servers.at(0);
         return {.name = choice.first,
-                .address = NO_IP,
-                .TCP = false,
-                .timeout = 200,
+                .address = choice.second,
+                .TCP = doTCP,
+                .timeout = selection_cache[choice.second].timeout,
                };
 
     }
@@ -67,15 +81,42 @@ void Selection::success(transport choice) {
 }
 
 void Selection::timeout(transport choice) {
-    return;
+    selection_cache[choice.address].packet_lost();
 }
 
-void Selection::rtt(transport choice, unsigned int elapsed) {
-    return;
+void Selection::rtt(transport choice, int elapsed) {
+    cout << "Updating " << choice.address.toString() << " with " << elapsed << endl;
+    selection_cache[choice.address].update(elapsed);
 }
 
 void Selection::error(transport choice, SelectionError error) {
-    return;
+    switch (error)
+    {
+    case TIMEOUT:
+        // we handle timeout separetly
+        return;
+
+    case TRUNCATED:
+        // but TCP tres crashes on long TXT records for some reason
+        doTCP = true;
+        return;
+
+    case CANT_RESOLVE_A:
+        local_state[choice.getServer()].noA = true;
+        return;
+
+    case CANT_RESOLVE_AAAA:
+        local_state[choice.getServer()].noAAAA = true;
+        return;
+
+    case FORMERROR:
+        // we could do something with EDNS but we don't
+
+    default:
+        local_state[choice.getServer()].errors++;
+    }
+
+
 }
 
 void Selection::resolve_ns(DNSName ns_name) {

@@ -1,5 +1,5 @@
-CXXFLAGS:=-std=gnu++14 -Wall -O2 -MMD -MP -ggdb -Iext/simplesocket -Iext/simplesocket/ext/fmt-5.2.1/include -Iext/ -pthread
-CFLAGS:= -Wall -O2 -MMD -MP -ggdb
+CXXFLAGS:=-std=gnu++14 -Wall -O0 -MMD -MP -ggdb -Iext/simplesocket -Iext/simplesocket/ext/fmt-5.2.1/include -Iext/ -pthread
+CFLAGS:= -Wall -O0 -MMD -MP -ggdb
 
 PROGRAMS = tauth tdig tres tdns-c-test
 
@@ -22,7 +22,7 @@ tauth: tauth.o tauth-main.o record-types.o dns-storage.o dnsmessages.o contents.
 tdig: tdig.o record-types.o dns-storage.o dnsmessages.o $(SIMPLESOCKET)
 	$(CXX) -std=gnu++14 $^ -o $@ -pthread
 
-tres: tres.o ns_cache.o record-types.o dns-storage.o dnsmessages.o $(SIMPLESOCKET)
+tres: tres.o selection.o ns_cache.o record-types.o dns-storage.o dnsmessages.o $(SIMPLESOCKET)
 	$(CXX) -std=gnu++14 $^ -o $@ -pthread -lsystemd
 
 

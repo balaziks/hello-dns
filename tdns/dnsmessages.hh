@@ -9,10 +9,13 @@
   @brief Defines DNSMessageReader and DNSMessageWriter
 */
 
-//! A class that parses a DNS Message 
+//! A class that parses a DNS Message
 class DNSMessageReader
 {
 public:
+  DNSMessageReader() {
+    return;
+  };
   DNSMessageReader(const char* input, uint16_t length);
   DNSMessageReader(const std::string& str) : DNSMessageReader(str.c_str(), str.size()) {}
   struct dnsheader dh=dnsheader{}; //!< the DNS header
@@ -21,11 +24,11 @@ public:
   uint16_t rrpos{0};               //!< Used in getRR to set section correctly
   uint16_t d_endofrecord;
   //! are we at the end of a record?
-  bool eor() const { return payloadpos == d_endofrecord; } 
+  bool eor() const { return payloadpos == d_endofrecord; }
 
   //! For debugging, size of our payload
   size_t size() const { return payload.size() + sizeof(struct dnsheader); }
-  
+
   //! Copies the qname and type to you
   void getQuestion(DNSName& name, DNSType& type) const;
   //! Returns true if there was an EDNS record, plus copies details
@@ -34,7 +37,7 @@ public:
   //! Puts the next RR in content, unless at 'end of message', in which case it returns false
   bool getRR(DNSSection& section, DNSName& name, DNSType& type, uint32_t& ttl, std::unique_ptr<RRGen>& content);
   void skipRRs(int n); //!< Skip over n RRs
-  
+
   uint8_t d_ednsVersion{0};
 
   void xfrName(DNSName& ret, uint16_t* pos=0); //!< put the next name in ret, or copy it from pos
@@ -47,7 +50,7 @@ public:
     res=payload.at((*pos)++);
   }
   //! Convenience form that returns the next 8 bit integer, or from pos
-  uint8_t getUInt8(uint16_t* pos=0) 
+  uint8_t getUInt8(uint16_t* pos=0)
   { uint8_t ret; xfrUInt8(ret, pos); return ret; }
 
   //! Gets the next 16 bit unsigned integer from the message
@@ -63,7 +66,7 @@ public:
   {
     xfrUInt16((uint16_t&)type);
   }
-  
+
   //! Convenience form that returns the next 16 bit integer
   uint16_t getUInt16()
   { uint16_t ret; xfrUInt16(ret); return ret; }
@@ -100,14 +103,14 @@ public:
     xfrBlob(res, size, pos);
     return res;
   }
-  
+
   DNSName d_qname;
   DNSType d_qtype{(DNSType)0};
   DNSClass d_qclass{(DNSClass)0};
   uint16_t d_bufsize;
   bool d_doBit{false};
   bool d_haveEDNS{false};
-}; 
+};
 
 //! A DNS Message writer
 class DNSMessageWriter
@@ -143,7 +146,7 @@ public:
   {
     xfrUInt16((uint16_t)val);
   }
-  
+
   uint16_t xfrUInt16(uint16_t val)
   {
     val = htons(val);
@@ -172,7 +175,7 @@ public:
     xfrUInt8(blob.size());
     xfrBlob(blob);
   }
-  
+
   void xfrBlob(const std::string& blob)
   {
     memcpy(&payload.at(payloadpos+blob.size()) - blob.size(), blob.c_str(), blob.size());
@@ -184,7 +187,7 @@ public:
     memcpy(&payload.at(payloadpos+size) - size, blob, size);
     payloadpos += size;
   }
-  
+
   void xfrName(const DNSName& name, bool compress=true);
 private:
   std::unique_ptr<DNSNode> d_comptree;
