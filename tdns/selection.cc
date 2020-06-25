@@ -59,6 +59,15 @@ transport Selection::get_transport() {
         // Best RTT over servers with minimal number of errors
         server choice = with_ip.at(0);
 
+
+        // Also resolve one asynchronously for good measure
+        // There is no deduplication for these, so that might cause some cycles :/
+        shuffle(without_ip.begin(), without_ip.end(), g);
+        if (without_ip.size()) {
+            cout << "<<<< resolving " << without_ip.at(0).first << " asynchronously" << endl;
+            resolve_ns(without_ip.at(0).first);
+        }
+
         return {.name = choice.first,
                 .address = choice.second,
                 .TCP = doTCP,
@@ -68,6 +77,7 @@ transport Selection::get_transport() {
         cout << "EXPLORE!" << endl;
         shuffle(servers.begin(), servers.end(), g);
         server choice = servers.at(0);
+
         return {.name = choice.first,
                 .address = choice.second,
                 .TCP = doTCP,
@@ -90,7 +100,7 @@ void Selection::rtt(transport choice, int elapsed) {
     selection_cache[choice.address].update(elapsed);
 }
 
-void Selection::error(transport choice, SelectionError error) {
+void Selection::error(transport choice, SelectionFeedback error) {
     switch (error)
     {
     case TIMEOUT:
@@ -119,8 +129,4 @@ void Selection::error(transport choice, SelectionError error) {
     }
 
 
-}
-
-void Selection::resolve_ns(DNSName ns_name) {
-    return;
 }

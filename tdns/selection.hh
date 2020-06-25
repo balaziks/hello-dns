@@ -3,10 +3,13 @@
 #include <random>
 #include <algorithm>
 #include <chrono>
+#include <thread>
 
 #include "sclasses.hh"
 #include "record-types.hh"
 #include "ns_cache.hh"
+
+#include "tres.hh"
 
 using namespace std;
 
@@ -17,6 +20,27 @@ const int SECOND = 1000 * MILLISECOND;
 
 const int MIN_TIMEOUT = 1 * MILLISECOND;
 const int MAX_TIMEOUT = 12 * SECOND;
+
+// This ought to be called as a thread and never join
+static void do_resolve_ns(DNSName ns_name, vector<DNSType> types, TDNSResolver* resolver)
+try
+{
+    for (auto type : types) {
+        auto ret = resolver->resolveAt(ns_name, type);
+        if (ret.res.size()) {
+            for(const auto& res : ret.res)
+                addr_cache[ns_name].insert(getIP(res.rr));
+        }
+    }
+}
+catch(TooManyQueriesException& e)
+{
+  cerr << "Thread died after too many queries" << endl;
+}
+catch(exception& e)
+{
+  cerr << "Thread died: " << e.what() << endl;
+}
 
 struct GlobalServerState {
     int rtt_estimate = 0; // microseconds
@@ -58,13 +82,11 @@ struct GlobalServerState {
         }
         return rtt_estimate + 4 * rtt_variance;
     }
-
-
 };
 
 extern map<ComboAddress, GlobalServerState> selection_cache;
 
-enum SelectionError {
+enum SelectionFeedback {
     SOCKET,
     CANT_RESOLVE_AAAA,
     CANT_RESOLVE_A,
@@ -97,19 +119,22 @@ struct LocalServerState {
 
 class Selection {
 public:
-    Selection(DNSName zonecut) : zonecut(zonecut) {};
+    Selection(DNSName zonecut, TDNSResolver* res) : zonecut(zonecut), resolver(res) {};
 
     transport get_transport();
     void success(transport choice);
     void timeout(transport choice);
     void rtt(transport choice, int elapsed);
-    void error(transport choice, SelectionError error);
+    void error(transport choice, SelectionFeedback error);
 
 private:
-    void resolve_ns(DNSName ns_name); //void for now
-
+    void resolve_ns(DNSName ns_name, vector<DNSType> types = {DNSType::A, DNSType::AAAA}) {
+        std::thread t(do_resolve_ns, ns_name, types, resolver);
+        t.detach();
+    }
     bool doTCP = false;
 
     DNSName zonecut;
+    TDNSResolver* resolver;
     map<server, LocalServerState> local_state;
 };
