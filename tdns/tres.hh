@@ -7,6 +7,9 @@
 
 using namespace std;
 
+extern multimap<DNSName, ComboAddress> g_root;
+
+
 /** Helper function that extracts a useable IP address from an
     A or AAAA resource record. Returns sin_family == 0 if it didn't work */
 static ComboAddress getIP(const std::unique_ptr<RRGen>& rr)

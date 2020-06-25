@@ -12,7 +12,7 @@
 #include "nenum.hh"
 #include "comboaddress.hh"
 
-/*! 
+/*!
    @file
    @brief Defines DNSLabel, DNSType, DNSClass and DNSNode, which together store DNS details
 */
@@ -35,7 +35,7 @@ struct dnsheader {
         unsigned        ad: 1;          /* authentic data from named */
         unsigned        cd: 1;          /* checking disabled by resolver */
         unsigned        rcode :4;       /* response code */
-#elif __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__ 
+#elif __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
                         /* fields in third byte */
         unsigned        rd :1;          /* recursion desired */
         unsigned        tc :1;          /* truncated message */
@@ -59,7 +59,7 @@ struct dnsheader {
 static_assert(sizeof(dnsheader) == 12, "dnsheader size must be 12");
 
 // enums
-enum class RCode 
+enum class RCode
 {
   Noerror = 0, Formerr = 1, Servfail = 2, Nxdomain = 3, Notimp = 4, Refused = 5, Notauth = 9, Badvers=16
 };
@@ -96,7 +96,7 @@ class DNSLabel
 {
 public:
   DNSLabel() {}
-  DNSLabel(const char* s) : DNSLabel(std::string(s)) {} 
+  DNSLabel(const char* s) : DNSLabel(std::string(s)) {}
   DNSLabel(const std::string& s) : d_s(s)
   {
     if(d_s.size() > 63)
@@ -107,14 +107,14 @@ public:
   {
     return std::lexicographical_compare(d_s.begin(), d_s.end(), rhs.d_s.begin(), rhs.d_s.end(), charcomp);
   }
-  
+
   bool operator==(const DNSLabel &rhs) const
   {
     return !(*this < rhs) && !(rhs<*this);
   }
   auto size() const { return d_s.size(); }
   auto empty() const { return d_s.empty(); }
-  
+
   std::string d_s;
 private:
   static bool charcomp(char a, char b)
@@ -192,15 +192,15 @@ struct RRSet
   std::vector<std::unique_ptr<RRGen>> signatures;
   void add(std::unique_ptr<RRGen>&& rr)
   {
-    if(rr->getType() != DNSType::RRSIG) 
+    if(rr->getType() != DNSType::RRSIG)
       contents.emplace_back(std::move(rr));
-    else 
+    else
       signatures.emplace_back(std::move(rr));
   }
   uint32_t ttl{3600};
 };
 
-//! A node in the DNS tree 
+//! A node in the DNS tree
 struct DNSNode
 {
   DNSLabel d_name;
@@ -213,14 +213,14 @@ struct DNSNode
 
   //! This is an idempotent way to add a node to a DNS tree
   DNSNode* add(DNSName name);
-  
+
   const DNSNode* next() const;
   const DNSNode* prev() const;
   DNSName getName() const
   {
     DNSName ret;
     auto us = this;
-    
+
     while(us) {
       if(!us->d_name.empty())
         ret.push_back(us->d_name);
@@ -228,9 +228,9 @@ struct DNSNode
     }
     return ret;
   }
-  //! add one RRGen to this node  
+  //! add one RRGen to this node
   void addRRs(std::unique_ptr<RRGen>&&a);
-  //! add multiple RRGen to this node  
+  //! add multiple RRGen to this node
   template<typename... Types>
   void addRRs(std::unique_ptr<RRGen>&&a, Types&&... args)
   {
@@ -254,10 +254,10 @@ struct DNSNode
     }
     using is_transparent = void;
   };
-  
+
   //! children, found by DNSLabel
   std::set<DNSNode, DNSNodeCmp> children;
-  
+
   // !the RRSets, grouped by type
   std::map<DNSType, RRSet > rrsets;
   std::unique_ptr<DNSNode> zone; //!< if this is set, this node is a zone
@@ -267,4 +267,4 @@ struct DNSNode
 //! Called by main() to load zone information
 void loadZones(DNSNode& zones);
 
-std::unique_ptr<DNSNode> retrieveZone(const ComboAddress& remote, const DNSName& zone); 
+std::unique_ptr<DNSNode> retrieveZone(const ComboAddress& remote, const DNSName& zone);

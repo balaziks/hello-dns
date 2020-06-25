@@ -22,11 +22,14 @@ const int MIN_TIMEOUT = 1 * MILLISECOND;
 const int MAX_TIMEOUT = 12 * SECOND;
 
 // This ought to be called as a thread and never join
-static void do_resolve_ns(DNSName ns_name, vector<DNSType> types, TDNSResolver* resolver)
+static void do_resolve_ns(DNSName ns_name)
 try
 {
+    DNSName name(ns_name);
+    vector<DNSType> types = {DNSType::A, DNSType::AAAA};
+    auto resolver = TDNSResolver(g_root);
     for (auto type : types) {
-        auto ret = resolver->resolveAt(ns_name, type);
+        auto ret = resolver.resolveAt(ns_name, type);
         if (ret.res.size()) {
             for(const auto& res : ret.res)
                 addr_cache[ns_name].insert(getIP(res.rr));
@@ -128,8 +131,8 @@ public:
     void error(transport choice, SelectionFeedback error);
 
 private:
-    void resolve_ns(DNSName ns_name, vector<DNSType> types = {DNSType::A, DNSType::AAAA}) {
-        std::thread t(do_resolve_ns, ns_name, types, resolver);
+    void resolve_ns(DNSName ns_name) {
+        std::thread t(do_resolve_ns, ns_name);
         t.detach();
     }
     bool doTCP = false;
